@@ -1,0 +1,39 @@
+{
+  "name": "@platformatic/instrumentation-light-my-request",
+  "version": "1.0.0",
+  "description": "OpenTelemetry instrumentation for light-my-request (Fastify inject)",
+  "main": "lib/instrumentation.js",
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "lint": "eslint"
+  },
+  "keywords": [
+    "opentelemetry",
+    "instrumentation",
+    "light-my-request",
+    "fastify",
+    "inject",
+    "platformatic"
+  ],
+  "author": "Platformatic",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@opentelemetry/instrumentation": "^0.53.0",
+    "@opentelemetry/semantic-conventions": "^1.27.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.0.0",
+    "light-my-request": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^1.28.0",
+    "@opentelemetry/sdk-trace-node": "^1.28.0",
+    "eslint": "^9.18.0",
+    "light-my-request": "^4.12.0",
+    "neostandard": "^0.12.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
