@@ -5,7 +5,20 @@ const assert = require('node:assert')
 const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node')
 const { InMemorySpanExporter, SimpleSpanProcessor } = require('@opentelemetry/sdk-trace-base')
 const { context, propagation, trace, SpanStatusCode } = require('@opentelemetry/api')
-const { ATTR_HTTP_REQUEST_METHOD, ATTR_HTTP_RESPONSE_STATUS_CODE, ATTR_URL_FULL, ATTR_URL_PATH } = require('@opentelemetry/semantic-conventions')
+const {
+  ATTR_HTTP_REQUEST_METHOD,
+  ATTR_HTTP_RESPONSE_STATUS_CODE,
+  ATTR_URL_FULL,
+  ATTR_URL_PATH,
+  ATTR_URL_QUERY,
+  ATTR_URL_SCHEME,
+  ATTR_CLIENT_ADDRESS,
+  ATTR_USER_AGENT_ORIGINAL,
+  ATTR_NETWORK_PROTOCOL_VERSION,
+  ATTR_SERVER_ADDRESS,
+  ATTR_SERVER_PORT,
+  ATTR_ERROR_TYPE
+} = require('@opentelemetry/semantic-conventions')
 const { LightMyRequestInstrumentation } = require('../lib/instrumentation.js')
 
 describe('LightMyRequestInstrumentation', () => {
@@ -13,6 +26,12 @@ describe('LightMyRequestInstrumentation', () => {
   let provider
   let exporter
   let inject
+
+  // Mutable hook state that tests can modify
+  const hooks = {
+    requestHook: null,
+    responseHook: null
+  }
 
   // Simple dispatch function for testing
   const dispatch = (req, res) => {
@@ -29,7 +48,19 @@ describe('LightMyRequestInstrumentation', () => {
     provider.register()
 
     // Create and enable instrumentation BEFORE requiring light-my-request
-    instrumentation = new LightMyRequestInstrumentation()
+    // Use wrapper functions that delegate to mutable hooks state
+    instrumentation = new LightMyRequestInstrumentation({
+      requestHook: (span, opts) => {
+        if (hooks.requestHook) {
+          hooks.requestHook(span, opts)
+        }
+      },
+      responseHook: (span, response) => {
+        if (hooks.responseHook) {
+          hooks.responseHook(span, response)
+        }
+      }
+    })
     instrumentation.setTracerProvider(provider)
     instrumentation.enable()
 
@@ -38,8 +69,10 @@ describe('LightMyRequestInstrumentation', () => {
   })
 
   beforeEach(() => {
-    // Reset exporter between tests
+    // Reset exporter and hooks between tests
     exporter.reset()
+    hooks.requestHook = null
+    hooks.responseHook = null
   })
 
   after(() => {
@@ -75,6 +108,13 @@ describe('LightMyRequestInstrumentation', () => {
       assert.strictEqual(spans[0].name, 'POST /api/users')
     })
 
+    it('should not include query string in span name', async () => {
+      await inject(dispatch, { method: 'GET', url: '/api/search?q=test&limit=10' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].name, 'GET /api/search')
+    })
+
     it('should set ATTR_HTTP_REQUEST_METHOD attribute', async () => {
       await inject(dispatch, { method: 'PUT', url: '/test' })
 
@@ -94,6 +134,90 @@ describe('LightMyRequestInstrumentation', () => {
 
       const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans[0].attributes[ATTR_URL_PATH], '/test')
+    })
+
+    it('should set ATTR_URL_QUERY attribute when query string present', async () => {
+      await inject(dispatch, { method: 'GET', url: '/test?foo=bar&baz=qux' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_URL_QUERY], 'foo=bar&baz=qux')
+    })
+
+    it('should not set ATTR_URL_QUERY attribute when no query string', async () => {
+      await inject(dispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_URL_QUERY], undefined)
+    })
+
+    it('should set ATTR_URL_SCHEME attribute to http', async () => {
+      await inject(dispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_URL_SCHEME], 'http')
+    })
+
+    it('should set ATTR_CLIENT_ADDRESS when remoteAddress provided', async () => {
+      await inject(dispatch, { method: 'GET', url: '/test', remoteAddress: '192.168.1.100' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_CLIENT_ADDRESS], '192.168.1.100')
+    })
+
+    it('should set ATTR_USER_AGENT_ORIGINAL from user-agent header', async () => {
+      await inject(dispatch, {
+        method: 'GET',
+        url: '/test',
+        headers: { 'user-agent': 'Mozilla/5.0 Test Agent' }
+      })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_USER_AGENT_ORIGINAL], 'Mozilla/5.0 Test Agent')
+    })
+
+    it('should set ATTR_USER_AGENT_ORIGINAL from User-Agent header (capitalized)', async () => {
+      await inject(dispatch, {
+        method: 'GET',
+        url: '/test',
+        headers: { 'User-Agent': 'Mozilla/5.0 Test Agent' }
+      })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_USER_AGENT_ORIGINAL], 'Mozilla/5.0 Test Agent')
+    })
+
+    it('should set ATTR_NETWORK_PROTOCOL_VERSION from http-version header', async () => {
+      await inject(dispatch, {
+        method: 'GET',
+        url: '/test',
+        headers: { 'http-version': '1.1' }
+      })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_NETWORK_PROTOCOL_VERSION], '1.1')
+    })
+
+    it('should set ATTR_SERVER_ADDRESS from Host header', async () => {
+      await inject(dispatch, {
+        method: 'GET',
+        url: '/test',
+        headers: { host: 'example.com' }
+      })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_SERVER_ADDRESS], 'example.com')
+    })
+
+    it('should set ATTR_SERVER_ADDRESS and ATTR_SERVER_PORT from Host header with port', async () => {
+      await inject(dispatch, {
+        method: 'GET',
+        url: '/test',
+        headers: { host: 'example.com:8080' }
+      })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_SERVER_ADDRESS], 'example.com')
+      assert.strictEqual(spans[0].attributes[ATTR_SERVER_PORT], 8080)
     })
 
     it('should set ATTR_HTTP_RESPONSE_STATUS_CODE on response', async () => {
@@ -253,6 +377,54 @@ describe('LightMyRequestInstrumentation', () => {
       const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans[0].status.code, SpanStatusCode.ERROR)
     })
+
+    it('should set ATTR_ERROR_TYPE to status code for 4xx responses', async () => {
+      const customDispatch = (req, res) => {
+        res.writeHead(404, { 'Content-Type': 'text/plain' })
+        res.end('Not Found')
+      }
+
+      await inject(customDispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], '404')
+    })
+
+    it('should set ATTR_ERROR_TYPE to status code for 5xx responses', async () => {
+      const customDispatch = (req, res) => {
+        res.writeHead(503, { 'Content-Type': 'text/plain' })
+        res.end('Service Unavailable')
+      }
+
+      await inject(customDispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], '503')
+    })
+
+    it('should not set ATTR_ERROR_TYPE for 2xx responses', async () => {
+      const customDispatch = (req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('OK')
+      }
+
+      await inject(customDispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], undefined)
+    })
+
+    it('should not set ATTR_ERROR_TYPE for 3xx responses', async () => {
+      const customDispatch = (req, res) => {
+        res.writeHead(302, { Location: '/redirect' })
+        res.end()
+      }
+
+      await inject(customDispatch, { method: 'GET', url: '/test' })
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], undefined)
+    })
   })
 
   describe('Error Handling', () => {
@@ -308,50 +480,54 @@ describe('LightMyRequestInstrumentation', () => {
       assert.strictEqual(spans[0].status.code, SpanStatusCode.ERROR)
       assert.strictEqual(spans[0].status.message, 'Custom error message')
     })
+
+    it('should set ATTR_ERROR_TYPE to error name on exception', async () => {
+      const errorDispatch = (req, res) => {
+        throw new Error('Test error')
+      }
+
+      await assert.rejects(
+        inject(errorDispatch, { method: 'GET', url: '/test' })
+      )
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], 'Error')
+    })
+
+    it('should set ATTR_ERROR_TYPE to custom error name on exception', async () => {
+      class CustomError extends Error {
+        constructor (message) {
+          super(message)
+          this.name = 'CustomError'
+        }
+      }
+
+      const errorDispatch = (req, res) => {
+        throw new CustomError('Custom error')
+      }
+
+      await assert.rejects(
+        inject(errorDispatch, { method: 'GET', url: '/test' })
+      )
+
+      const spans = exporter.getFinishedSpans()
+      assert.strictEqual(spans[0].attributes[ATTR_ERROR_TYPE], 'CustomError')
+    })
   })
 
   describe('Request Hook', () => {
-    let hookInstrumentation
-    let hookProvider
-    let hookExporter
-    let hookInject
-
-    beforeEach(() => {
-      hookExporter = new InMemorySpanExporter()
-      hookProvider = new NodeTracerProvider()
-      hookProvider.addSpanProcessor(new SimpleSpanProcessor(hookExporter))
-      hookProvider.register()
-    })
-
-    after(() => {
-      if (hookInstrumentation) {
-        hookInstrumentation.disable()
-      }
-      if (hookProvider) {
-        hookProvider.shutdown()
-      }
-    })
-
     it('should call requestHook when provided (promise style)', async () => {
       let hookCalled = false
       let capturedSpan = null
       let capturedOpts = null
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          hookCalled = true
-          capturedSpan = span
-          capturedOpts = opts
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        hookCalled = true
+        capturedSpan = span
+        capturedOpts = opts
+      }
 
-      // Import a fresh instance
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      await hookInject(dispatch, { method: 'POST', url: '/api/test', payload: { foo: 'bar' } })
+      await inject(dispatch, { method: 'POST', url: '/api/test', payload: { foo: 'bar' } })
 
       assert.strictEqual(hookCalled, true)
       assert.ok(capturedSpan)
@@ -366,20 +542,13 @@ describe('LightMyRequestInstrumentation', () => {
       let capturedSpan = null
       let capturedOpts = null
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          hookCalled = true
-          capturedSpan = span
-          capturedOpts = opts
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        hookCalled = true
+        capturedSpan = span
+        capturedOpts = opts
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      hookInject(dispatch, { method: 'GET', url: '/test' }, (err, res) => {
+      inject(dispatch, { method: 'GET', url: '/test' }, (err, res) => {
         assert.ifError(err)
         assert.strictEqual(hookCalled, true)
         assert.ok(capturedSpan)
@@ -391,102 +560,54 @@ describe('LightMyRequestInstrumentation', () => {
     })
 
     it('should allow requestHook to add custom span attributes', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          span.setAttribute('custom.attribute', 'test-value')
-          span.setAttribute('custom.method', opts.method)
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        span.setAttribute('custom.attribute', 'test-value')
+        span.setAttribute('custom.method', opts.method)
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      await inject(dispatch, { method: 'PUT', url: '/test' })
 
-      await hookInject(dispatch, { method: 'PUT', url: '/test' })
-
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.strictEqual(spans[0].attributes['custom.attribute'], 'test-value')
       assert.strictEqual(spans[0].attributes['custom.method'], 'PUT')
     })
 
     it('should not fail if requestHook is not provided', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation()
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      // hooks.requestHook is already null from beforeEach
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
-
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
     })
 
     it('should handle requestHook that throws an error', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          throw new Error('Hook error')
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
-
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      hooks.requestHook = (span, opts) => {
+        throw new Error('Hook error')
+      }
 
       // The error in the hook should be caught and logged, but not prevent the request from completing
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.strictEqual(spans[0].status.code, SpanStatusCode.OK)
     })
   })
 
   describe('Response Hook', () => {
-    let hookInstrumentation
-    let hookProvider
-    let hookExporter
-    let hookInject
-
-    beforeEach(() => {
-      hookExporter = new InMemorySpanExporter()
-      hookProvider = new NodeTracerProvider()
-      hookProvider.addSpanProcessor(new SimpleSpanProcessor(hookExporter))
-      hookProvider.register()
-    })
-
-    after(() => {
-      if (hookInstrumentation) {
-        hookInstrumentation.disable()
-      }
-      if (hookProvider) {
-        hookProvider.shutdown()
-      }
-    })
-
     it('should call responseHook when provided (promise style)', async () => {
       let hookCalled = false
       let capturedSpan = null
       let capturedResponse = null
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        responseHook: (span, response) => {
-          hookCalled = true
-          capturedSpan = span
-          capturedResponse = response
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.responseHook = (span, response) => {
+        hookCalled = true
+        capturedSpan = span
+        capturedResponse = response
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
       assert.strictEqual(hookCalled, true)
       assert.ok(capturedSpan)
@@ -499,20 +620,13 @@ describe('LightMyRequestInstrumentation', () => {
       let capturedSpan = null
       let capturedResponse = null
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        responseHook: (span, response) => {
-          hookCalled = true
-          capturedSpan = span
-          capturedResponse = response
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.responseHook = (span, response) => {
+        hookCalled = true
+        capturedSpan = span
+        capturedResponse = response
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      hookInject(dispatch, { method: 'POST', url: '/test' }, (err, res) => {
+      inject(dispatch, { method: 'POST', url: '/test' }, (err, res) => {
         assert.ifError(err)
         assert.strictEqual(hookCalled, true)
         assert.ok(capturedSpan)
@@ -523,21 +637,14 @@ describe('LightMyRequestInstrumentation', () => {
     })
 
     it('should allow responseHook to add custom span attributes', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        responseHook: (span, response) => {
-          span.setAttribute('custom.status', response.statusCode)
-          span.setAttribute('custom.payload', response.payload)
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.responseHook = (span, response) => {
+        span.setAttribute('custom.status', response.statusCode)
+        span.setAttribute('custom.payload', response.payload)
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
-
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.strictEqual(spans[0].attributes['custom.status'], 200)
       assert.ok(spans[0].attributes['custom.payload'])
@@ -547,24 +654,17 @@ describe('LightMyRequestInstrumentation', () => {
       let hookCalled = false
       let capturedResponse = null
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        responseHook: (span, response) => {
-          hookCalled = true
-          capturedResponse = response
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
-
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      hooks.responseHook = (span, response) => {
+        hookCalled = true
+        capturedResponse = response
+      }
 
       const errorDispatch = (req, res) => {
         res.writeHead(404, { 'Content-Type': 'text/plain' })
         res.end('Not Found')
       }
 
-      await hookInject(errorDispatch, { method: 'GET', url: '/test' })
+      await inject(errorDispatch, { method: 'GET', url: '/test' })
 
       assert.strictEqual(hookCalled, true)
       assert.ok(capturedResponse)
@@ -572,86 +672,45 @@ describe('LightMyRequestInstrumentation', () => {
     })
 
     it('should not fail if responseHook is not provided', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation()
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      // hooks.responseHook is already null from beforeEach
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
-
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
     })
 
     it('should handle responseHook that throws an error', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        responseHook: (span, response) => {
-          throw new Error('Hook error')
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
-
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      hooks.responseHook = (span, response) => {
+        throw new Error('Hook error')
+      }
 
       // The error in the hook should be caught and logged, but not prevent the response from being returned
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.strictEqual(spans[0].status.code, SpanStatusCode.OK)
     })
   })
 
   describe('Combined Hooks', () => {
-    let hookInstrumentation
-    let hookProvider
-    let hookExporter
-    let hookInject
-
-    beforeEach(() => {
-      hookExporter = new InMemorySpanExporter()
-      hookProvider = new NodeTracerProvider()
-      hookProvider.addSpanProcessor(new SimpleSpanProcessor(hookExporter))
-      hookProvider.register()
-    })
-
-    after(() => {
-      if (hookInstrumentation) {
-        hookInstrumentation.disable()
-      }
-      if (hookProvider) {
-        hookProvider.shutdown()
-      }
-    })
-
     it('should call both requestHook and responseHook in order', async () => {
       const callOrder = []
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          callOrder.push('request')
-          span.setAttribute('custom.request', 'true')
-        },
-        responseHook: (span, response) => {
-          callOrder.push('response')
-          span.setAttribute('custom.response', 'true')
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        callOrder.push('request')
+        span.setAttribute('custom.request', 'true')
+      }
+      hooks.responseHook = (span, response) => {
+        callOrder.push('response')
+        span.setAttribute('custom.response', 'true')
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
       assert.deepStrictEqual(callOrder, ['request', 'response'])
 
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.strictEqual(spans[0].attributes['custom.request'], 'true')
       assert.strictEqual(spans[0].attributes['custom.response'], 'true')
@@ -660,21 +719,14 @@ describe('LightMyRequestInstrumentation', () => {
     it('should call both hooks with callback style', (_, done) => {
       const callOrder = []
 
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          callOrder.push('request')
-        },
-        responseHook: (span, response) => {
-          callOrder.push('response')
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        callOrder.push('request')
+      }
+      hooks.responseHook = (span, response) => {
+        callOrder.push('response')
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
-
-      hookInject(dispatch, { method: 'GET', url: '/test' }, (err, res) => {
+      inject(dispatch, { method: 'GET', url: '/test' }, (err, res) => {
         assert.ifError(err)
         assert.deepStrictEqual(callOrder, ['request', 'response'])
         done()
@@ -682,25 +734,18 @@ describe('LightMyRequestInstrumentation', () => {
     })
 
     it('should allow hooks to share data via span attributes', async () => {
-      hookInstrumentation = new LightMyRequestInstrumentation({
-        requestHook: (span, opts) => {
-          span.setAttribute('request.timestamp', Date.now())
-        },
-        responseHook: (span, response) => {
-          const requestTime = span.attributes['request.timestamp']
-          assert.ok(requestTime)
-          span.setAttribute('response.duration', Date.now() - requestTime)
-        }
-      })
-      hookInstrumentation.setTracerProvider(hookProvider)
-      hookInstrumentation.enable()
+      hooks.requestHook = (span, opts) => {
+        span.setAttribute('request.timestamp', Date.now())
+      }
+      hooks.responseHook = (span, response) => {
+        const requestTime = span.attributes['request.timestamp']
+        assert.ok(requestTime)
+        span.setAttribute('response.duration', Date.now() - requestTime)
+      }
 
-      delete require.cache[require.resolve('light-my-request')]
-      hookInject = require('light-my-request')
+      await inject(dispatch, { method: 'GET', url: '/test' })
 
-      await hookInject(dispatch, { method: 'GET', url: '/test' })
-
-      const spans = hookExporter.getFinishedSpans()
+      const spans = exporter.getFinishedSpans()
       assert.strictEqual(spans.length, 1)
       assert.ok(spans[0].attributes['request.timestamp'])
       assert.ok(spans[0].attributes['response.duration'] >= 0)
