@@ -17,6 +17,10 @@
   ],
   "author": "Platformatic",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/platformatic/instrumentation-light-my-request.git"
+  },
   "dependencies": {
     "@opentelemetry/instrumentation": "^0.53.0",
     "@opentelemetry/semantic-conventions": "^1.27.0"
