@@ -1,6 +1,6 @@
 {
   "name": "@platformatic/instrumentation-light-my-request",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "OpenTelemetry instrumentation for light-my-request (Fastify inject)",
   "main": "lib/instrumentation.js",
   "scripts": {
